@@ -1,66 +1,130 @@
-import Image from "next/image";
-import styles from "./page.module.css";
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { WorkflowCanvas } from "@/components/canvas/WorkflowCanvas";
+import { NodeSidebar } from "@/components/sidebar/NodeSidebar";
+import { NodeConfigPanel } from "@/components/panels/NodeConfigPanel";
+import { SimulationPanel } from "@/components/panels/SimulationPanel";
+import { ExecutionLogModal } from "@/components/panels/ExecutionLogModal";
+import { WorkflowToolbar } from "@/components/panels/WorkflowToolbar";
+import { useWorkflowState } from "@/hooks/useWorkflowState";
+import { useSimulation } from "@/hooks/useSimulation";
+import { validateWorkflow } from "@/utils/validation";
+import { buildOnboardingTemplate } from "@/utils/templates";
 
 export default function Home() {
+  const workflow = useWorkflowState();
+  const simulation = useSimulation();
+  const [logModalOpen, setLogModalOpen] = useState(false);
+
+  const validationIssues = useMemo(
+    () => validateWorkflow({ nodes: workflow.nodes, edges: workflow.edges }),
+    [workflow.nodes, workflow.edges],
+  );
+  const validationByNode = useMemo(() => {
+    const map = new Map<string, { severity: "error" | "warning"; messages: string[] }>();
+    validationIssues.forEach((issue) => {
+      if (!issue.nodeId) {
+        return;
+      }
+      const current = map.get(issue.nodeId);
+      const nextSeverity =
+        current?.severity === "error" || issue.severity === "error" ? "error" : "warning";
+      map.set(issue.nodeId, {
+        severity: nextSeverity,
+        messages: [...(current?.messages ?? []), issue.message],
+      });
+    });
+    return map;
+  }, [validationIssues]);
+
+  const displayNodes = useMemo(
+    () =>
+      workflow.nodes.map((node) => ({
+        ...node,
+        data: {
+          ...node.data,
+          validationSeverity: validationByNode.get(node.id)?.severity,
+          validationMessages: validationByNode.get(node.id)?.messages ?? [],
+        },
+        className: simulation.activeNodeId === node.id ? "node-active" : "",
+      })),
+    [workflow.nodes, validationByNode, simulation.activeNodeId],
+  );
+
+  useEffect(() => {
+    simulation.clearSimulation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflow.nodes, workflow.edges]);
+
+  const runSimulation = async () => {
+    const errorIssues = validationIssues.filter((issue) => issue.severity === "error");
+
+    if (errorIssues.length > 0) {
+      return;
+    }
+
+    await simulation.runSimulation(workflow.serialize());
+  };
+
+  const combinedErrors = [
+    ...(workflow.graphError ? [workflow.graphError] : []),
+    ...validationIssues.filter((issue) => issue.severity === "error").map((issue) => issue.message),
+    ...simulation.errors,
+  ];
+
   return (
-    <div className={styles.page}>
-      <main className={styles.main}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main className="app-shell">
+      <header className="topbar">
+        <div>
+          <h1>HR Workflow Designer</h1>
+          <p className="panel-subtext">Design and simulate HR process workflows.</p>
+        </div>
+        <WorkflowToolbar
+          onExport={workflow.serialize}
+          onImport={workflow.replaceWorkflow}
+          onLoadTemplate={() => workflow.replaceWorkflow(buildOnboardingTemplate())}
+          onClearWorkflow={workflow.clearWorkflow}
+          onRunWorkflow={() => {
+            setLogModalOpen(true);
+            runSimulation();
+          }}
+          isRunning={simulation.isRunning}
         />
-        <div className={styles.intro}>
-          <h1>To get started, edit the page.tsx file.</h1>
-          <p>
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className={styles.ctas}>
-          <a
-            className={styles.primary}
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className={styles.logo}
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className={styles.secondary}
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+      </header>
+
+      <section className={`workspace-grid ${workflow.selectedNode ? "with-config" : "without-config"}`}>
+        <NodeSidebar />
+        <WorkflowCanvas
+          nodes={displayNodes}
+          edges={workflow.edges}
+          onNodesChange={workflow.onNodesChange}
+          onEdgesChange={workflow.onEdgesChange}
+          onConnect={workflow.onConnect}
+          onNodeSelect={workflow.setSelectedNodeId}
+          addNode={workflow.addNode}
+        />
+        {workflow.selectedNode && (
+          <NodeConfigPanel
+            selectedNode={workflow.selectedNode}
+            updateNodeConfig={workflow.updateNodeConfig}
+          />
+        )}
+      </section>
+
+      <SimulationPanel
+        errors={Array.from(new Set(combinedErrors))}
+        logs={simulation.logs}
+        wasSuccessful={simulation.lastRunSuccess}
+      />
+      <ExecutionLogModal
+        isOpen={logModalOpen}
+        onClose={() => setLogModalOpen(false)}
+        logs={simulation.logs}
+        wasSuccessful={simulation.lastRunSuccess}
+        isRunning={simulation.isRunning}
+        errors={Array.from(new Set(combinedErrors))}
+      />
+    </main>
   );
 }
